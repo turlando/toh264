@@ -53,14 +53,6 @@ class AnsiCode(Enum):
 
 LogLevelToAnsiCode = dict[int, AnsiCode]
 
-LOG_LEVEL_COLOR: LogLevelToAnsiCode = {
-    logging.CRITICAL: AnsiCode.RED,
-    logging.ERROR: AnsiCode.RED,
-    logging.WARNING: AnsiCode.YELLOW,
-    logging.INFO: AnsiCode.GREEN,
-    logging.DEBUG: AnsiCode.CYAN
-}
-
 
 class AnsiLoggingStreamHandler(logging.StreamHandler):
     # Overriding from logging.Handler(Filtered)
@@ -74,6 +66,15 @@ class AnsiLoggingStreamHandler(logging.StreamHandler):
     def __init__(self, mapping: LogLevelToAnsiCode):
         self.mapping = mapping
         super().__init__(stream=None)
+
+
+LOG_LEVEL_COLOR: LogLevelToAnsiCode = {
+    logging.CRITICAL: AnsiCode.RED,
+    logging.ERROR: AnsiCode.RED,
+    logging.WARNING: AnsiCode.YELLOW,
+    logging.INFO: AnsiCode.GREEN,
+    logging.DEBUG: AnsiCode.CYAN
+}
 
 
 LOG_FORMAT = "%(levelname).1s: %(message)s"
@@ -96,6 +97,9 @@ class Duration:
     def to_seconds(self) -> Second:
         return self.seconds + round(decimal_to_float(self.microseconds))
 
+    def __str__(self) -> str:
+        return "{}.{}".format(self.seconds, self.microseconds)
+
 ###############################################################################
 
 def bytes_to_kilobits(size: Byte) -> Kilobit:
@@ -116,15 +120,24 @@ def to_kbps(size: Byte, duration: Duration) -> KilobitPerSecond:
 
 ###############################################################################
 
-def run(*args: str) -> subprocess.CompletedProcess:
+def run(
+        *args: str,
+        capture_output=False,
+        log_cmd=False
+) -> subprocess.CompletedProcess:
+    arg_stdout = subprocess.PIPE if capture_output is True else None
+    arg_stderr = subprocess.PIPE if capture_output is True else None
+
     with subprocess.Popen(
             args,
             encoding='utf-8',
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=arg_stdout,
+            stderr=arg_stderr
     ) as process:
-        cmd = ' '.join(process.args)  # type: ignore
-        log.info(f"Running: {cmd}")
+        if log_cmd is True:
+            cmd = ' '.join(process.args)  # type: ignore
+            log.debug(f"Running: {cmd}")
+
         stdout, stderr = process.communicate()
         process.wait()
 
@@ -135,11 +148,11 @@ def run(*args: str) -> subprocess.CompletedProcess:
 
 
 def ffmpeg(*args: str) -> subprocess.CompletedProcess:
-    return run(FFMPEG_BIN.as_posix(), *args)
+    return run(FFMPEG_BIN.as_posix(), *args, log_cmd=True)
 
 
 def ffprobe(*args: str) -> subprocess.CompletedProcess:
-    return run(FFPROBE_BIN.as_posix(), *args)
+    return run(FFPROBE_BIN.as_posix(), *args, capture_output=True)
 
 ###############################################################################
 
@@ -164,6 +177,8 @@ def constant_rate_factor_transcoding(
         audio_bitrate: KilobitPerSecond,
         audio_mono: bool
 ):
+    log.info("Transcoding in constant rate factor mode")
+
     ffmpeg(
         '-loglevel', 'warning', '-stats',
         '-y',
@@ -188,9 +203,19 @@ def two_pass_transcoding(
         audio_bitrate: KilobitPerSecond,
         audio_mono: bool
 ):
+    log.info("Transcoding in two-pass mode")
+
     duration = get_duration(input_path)
     total_bitrate = to_kbps(megabytes_to_bytes(target_size), duration)
     video_bitrate = total_bitrate - audio_bitrate
+
+    log.info(f"Video duration: {duration} s")
+    log.info(f"Target size: {target_size} MB")
+    log.info(f"Target bitrate: {total_bitrate} kbps")
+    log.info(f"Audio bitrate: {audio_bitrate} kbps")
+    log.info(f"Video bitrate: {video_bitrate} kbps")
+
+    log.info("Running first pass")
 
     ffmpeg(
         '-loglevel', 'warning', '-stats',
@@ -204,6 +229,8 @@ def two_pass_transcoding(
         '-an',
         '-f', 'null', '/dev/null'
     )
+
+    log.info("Running second pass")
 
     ffmpeg(
         '-loglevel', 'warning', '-stats',
@@ -307,7 +334,7 @@ def make_argument_parser():
     video_group.add_argument(
         '-crf', '--constant-rate-factor',
         type=int,
-        choices=range(1, 51 + 1),
+        choices=range(0, 51 + 1),
         help="CRF value between 0 and 51",
         metavar='CRF',
         dest='constant_rate_factor'

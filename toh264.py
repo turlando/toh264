@@ -22,10 +22,12 @@ import logging
 import sys
 import subprocess
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from math import floor, log10
 from pathlib import Path
+from typing import Optional, Union
+
 
 ###############################################################################
 
@@ -35,11 +37,15 @@ Byte = int
 Kilobit = int
 Megabyte = int
 KilobitPerSecond = int
+FramesPerSecond = int
+
 
 ###############################################################################
 
+DEV_NULL = Path('/dev/null')
 FFMPEG_BIN = Path('/usr/bin/ffmpeg')
 FFPROBE_BIN = Path('/usr/bin/ffprobe')
+
 
 ###############################################################################
 
@@ -87,6 +93,7 @@ logging.basicConfig(
 log = logging.getLogger()
 log.setLevel(logging.DEBUG)
 
+
 ###############################################################################
 
 @dataclass
@@ -99,6 +106,7 @@ class Duration:
 
     def __str__(self) -> str:
         return "{}.{}".format(self.seconds, self.microseconds)
+
 
 ###############################################################################
 
@@ -117,6 +125,7 @@ def decimal_to_float(decimal: int) -> float:
 
 def to_kbps(size: Byte, duration: Duration) -> KilobitPerSecond:
     return round(bytes_to_kilobits(size) / duration.to_seconds())
+
 
 ###############################################################################
 
@@ -154,6 +163,7 @@ def ffmpeg(*args: str) -> subprocess.CompletedProcess:
 def ffprobe(*args: str) -> subprocess.CompletedProcess:
     return run(FFPROBE_BIN.as_posix(), *args, capture_output=True)
 
+
 ###############################################################################
 
 def get_duration(path: Path) -> Duration:
@@ -167,85 +177,170 @@ def get_duration(path: Path) -> Duration:
 
     return Duration(*[int(s) for s in process.stdout.strip().split('.')])
 
-###############################################################################
-
-def constant_rate_factor_transcoding(
-        input_path: Path,
-        output_path: Path,
-        frame_per_seconds: int,
-        constant_rate_factor: int,
-        audio_bitrate: KilobitPerSecond,
-        audio_mono: bool
-):
-    log.info("Transcoding in constant rate factor mode")
-
-    ffmpeg(
-        '-loglevel', 'warning', '-stats',
-        '-y',
-        '-i', input_path.as_posix(),
-        '-filter:v', f'fps={frame_per_seconds}',
-        '-c:v', 'libx264', '-crf', str(constant_rate_factor),
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', f'{audio_bitrate}k',
-        *(['-ac', '1'] if audio_mono is True else []),
-        '-profile:v', 'high', '-preset', 'veryslow',
-        '-movflags', '+faststart',
-        output_path.as_posix()
-    )
 
 ###############################################################################
 
-def two_pass_transcoding(
-        input_path: Path,
-        output_path: Path,
-        frame_per_seconds: int,
-        target_size: Megabyte,
-        audio_bitrate: KilobitPerSecond,
-        audio_mono: bool
-):
-    log.info("Transcoding in two-pass mode")
+@dataclass
+class FfmpegOnePassOptions:
+    options: list[str] = field(default_factory=list)
 
-    duration = get_duration(input_path)
-    total_bitrate = to_kbps(megabytes_to_bytes(target_size), duration)
-    video_bitrate = total_bitrate - audio_bitrate
 
-    log.info(f"Video duration: {duration} s")
-    log.info(f"Target size: {target_size} MB")
-    log.info(f"Target bitrate: {total_bitrate} kbps")
-    log.info(f"Audio bitrate: {audio_bitrate} kbps")
-    log.info(f"Video bitrate: {video_bitrate} kbps")
+@dataclass
+class FfmpegTwoPassOptions:
+    first_pass_options: list[str] = field(default_factory=list)
+    second_pass_options: list[str] = field(default_factory=list)
 
-    log.info("Running first pass")
 
-    ffmpeg(
-        '-loglevel', 'warning', '-stats',
-        '-y',
-        '-i', input_path.as_posix(),
-        '-filter:v', f'fps={frame_per_seconds}',
-        '-c:v', 'libx264', '-b:v', f'{video_bitrate}k',
-        '-pix_fmt', 'yuv420p',
-        '-pass', '1',
-        '-profile:v', 'high', '-preset', 'veryslow',
-        '-an',
-        '-f', 'null', '/dev/null'
-    )
+FfmpegOptions = Union[FfmpegOnePassOptions, FfmpegTwoPassOptions]
 
-    log.info("Running second pass")
 
-    ffmpeg(
-        '-loglevel', 'warning', '-stats',
-        '-y',
-        '-i', input_path.as_posix(),
-        '-filter:v', f'fps={frame_per_seconds}',
-        '-c:v', 'libx264', '-b:v', f'{video_bitrate}k',
-        '-pix_fmt', 'yuv420p',
-        '-pass', '2',
-        '-c:a', 'aac', '-b:a', f'{audio_bitrate}k',
-        *(['-ac', '1'] if audio_mono is True else []),
-        '-profile:v', 'high', '-preset', 'veryslow',
-        '-movflags', '+faststart',
-        output_path.as_posix()
-    )
+def run_ffmpeg(options: FfmpegOptions):
+    if isinstance(options, FfmpegOnePassOptions):
+        ffmpeg(*options.options)
+        return
+
+    if isinstance(options, FfmpegTwoPassOptions):
+        log.info("Running first pass")
+        ffmpeg(*options.first_pass_options)
+        log.info("Running second pass")
+        ffmpeg(*options.second_pass_options)
+        return
+
+
+###############################################################################
+
+@dataclass
+class VideoConfig:
+    frames_per_second: Optional[int]
+
+
+@dataclass
+class ConstantRateFactorConfig:
+    crf: int
+
+
+@dataclass
+class TwoPassConfig:
+    target_size: Megabyte
+
+
+H264Config = Union[ConstantRateFactorConfig, TwoPassConfig]
+
+
+@dataclass
+class AudioConfig:
+    mono: bool
+    bitrate: KilobitPerSecond
+
+
+@dataclass
+class TranscodingConfig:
+    input_path: Path
+    output_path: Path
+    video_config: VideoConfig
+    h264_config: H264Config
+    audio_config: AudioConfig
+
+
+###############################################################################
+
+FFMPEG_QUIET_OPTIONS = ['-loglevel', 'warning', '-stats', '-y']
+H264_CODEC_OPTIONS = ['-c:v', 'libx264']
+PIX_FMT_OPTIONS = ['-pix_fmt', 'yuv420p']
+AAC_CODEC_OPTIONS = ['-c:a', 'aac']
+H264_PROFILE_OPTIONS = ['-profile:v', 'high']
+H264_PRESET_OPTIONS = ['-preset', 'veryslow']
+MP4_OPTIONS = ['-movflags', '+faststart']
+FIRST_PASS_OPTIONS = ['-pass', '1']
+SECOND_PASS_OPTIONS = ['-pass', '2']
+NO_AUDIO_OPTIONS = ['-an']
+NULL_CONTAINER_OPTIONS = ['-f', 'null']
+
+
+def input_options(path: Path):
+    return ['-i', path.as_posix()]
+
+
+def output_options(path: Path):
+    return [path.as_posix()]
+
+
+def frames_per_second_options(fps: Optional[int]):
+    return (['-filter:v', f'fps={fps}']
+            if fps is not None
+            else [])
+
+
+def h264_cfr_options(cfr: KilobitPerSecond):
+    return [*H264_CODEC_OPTIONS, '-cfr', str(cfr)]
+
+
+def h264_twopass_options(bitrate: KilobitPerSecond):
+    return [*H264_CODEC_OPTIONS, '-b:v', f'{bitrate}k']
+
+
+def aac_options(bitrate: KilobitPerSecond, mono: bool):
+    return [*AAC_CODEC_OPTIONS,
+            '-b:a', f'{bitrate}k',
+            *(['-ac', '1'] if mono is True else [])]
+
+
+###############################################################################
+
+def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
+    if isinstance(config.h264_config, ConstantRateFactorConfig):
+        log.info("Transcoding in constant rate factor mode")
+
+        return FfmpegOnePassOptions([
+            *FFMPEG_QUIET_OPTIONS,
+            *input_options(config.input_path),
+            *frames_per_second_options(config.video_config.frames_per_second),
+            *h264_cfr_options(config.h264_config.crf),
+            *PIX_FMT_OPTIONS,
+            *aac_options(config.audio_config.bitrate, config.audio_config.mono),
+            *H264_PROFILE_OPTIONS,
+            *H264_PRESET_OPTIONS,
+            *MP4_OPTIONS,
+            output_options(config.output_path)
+        ])
+
+    if isinstance(config.h264_config, TwoPassConfig):
+        log.info("Transcoding in two-pass mode")
+
+        duration = get_duration(config.input_path)
+        total_bitrate = to_kbps(megabytes_to_bytes(config.h264_config.target_size),
+                                duration)
+        video_bitrate = total_bitrate - config.audio_config.bitrate
+
+        log.info(f"Video duration: {duration} s")
+        log.info(f"Target size: {config.h264_config.target_size} MB")
+        log.info(f"Target bitrate: {total_bitrate} kbps")
+        log.info(f"Audio bitrate: {config.audio_config.bitrate} kbps")
+        log.info(f"Video bitrate: {video_bitrate} kbps")
+
+        return FfmpegTwoPassOptions([
+            *FFMPEG_QUIET_OPTIONS,
+            *input_options(config.input_path),
+            *frames_per_second_options(config.video_config.frames_per_second),
+            *h264_twopass_options(video_bitrate),
+            *PIX_FMT_OPTIONS,
+            *FIRST_PASS_OPTIONS,
+            *H264_PROFILE_OPTIONS,
+            *NO_AUDIO_OPTIONS,
+            *NULL_CONTAINER_OPTIONS,
+            *output_options(DEV_NULL)
+        ], [
+            *FFMPEG_QUIET_OPTIONS,
+            *input_options(config.input_path),
+            *frames_per_second_options(config.video_config.frames_per_second),
+            *h264_twopass_options(video_bitrate),
+            *PIX_FMT_OPTIONS,
+            *SECOND_PASS_OPTIONS,
+            *aac_options(config.audio_config.bitrate, config.audio_config.mono),
+            *H264_PROFILE_OPTIONS,
+            *output_options(config.output_path)
+        ])
+
 
 ###############################################################################
 
@@ -302,12 +397,12 @@ def make_argument_parser():
     encoder_group = parser.add_argument_group("Encoding")
 
     encoder_group.add_argument(
-        '-fps', '--frame-per-seconds',
+        '-fps', '--frames-per-second',
         default=30,
         type=int,
-        help="Frame per seconds",
+        help="Frames per second",
         metavar='FPS',
-        dest='frame_per_seconds'
+        dest='frames_per_second'
     )
 
     encoder_group.add_argument(
@@ -352,6 +447,7 @@ def make_argument_parser():
 
     return parser
 
+
 ###############################################################################
 
 def fatal(message: str):
@@ -372,19 +468,25 @@ def main():
     if args.output_path.exists() is True and args.force is False:
         fatal("Output file exists. If you want to overwrite it use --force.")
 
-    if args.constant_rate_factor is not None:
-        return constant_rate_factor_transcoding(
-            args.input_path, args.output_path,
-            args.frame_per_seconds, args.constant_rate_factor,
-            args.audio_bitrate, args.audio_mono
+    config = TranscodingConfig(
+        input_path=args.input_path,
+        output_path=args.output_path,
+        video_config=VideoConfig(frames_per_second=args.frames_per_second),
+        h264_config=(
+            ConstantRateFactorConfig(crf=args.constant_rate_factor)
+            if args.constant_rate_factor is not None
+            else TwoPassConfig(target_size=args.target_size)
+        ),
+        audio_config=AudioConfig(
+            mono=args.audio_mono,
+            bitrate=args.audio_bitrate
         )
+    )
 
-    if args.target_size is not None:
-        return two_pass_transcoding(
-            args.input_path, args.output_path,
-            args.frame_per_seconds, args.target_size,
-            args.audio_bitrate, args.audio_mono
-        )
+    ffmpeg_options = config_to_options(config)
+
+    run_ffmpeg(ffmpeg_options)
+
 
 ###############################################################################
 

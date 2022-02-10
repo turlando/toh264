@@ -234,6 +234,8 @@ def run_ffmpeg(options: FfmpegOptions):
 class VideoConfig:
     frames_per_second: Optional[int]
     resolution: Optional[Resolution]
+    resolution_width: Optional[Width]
+    resolution_height: Optional[Height]
 
 
 @dataclass
@@ -287,18 +289,37 @@ def output_options(path: Path):
     return [path.as_posix()]
 
 
-def filter_options(fps: Optional[int], resolution: Optional[Resolution]):
-    if (fps is None and resolution is None):
-        return []
+def fps_filter_options(fps: Optional[FramesPerSecond]):
+    return [f'fps={fps}'] if fps is not None else []
 
-    fps_filter = [f'fps={fps}'] if fps is not None else []
-    resolution_filter = ([f'scale={resolution.width}:{resolution.height}']
-                         if resolution is not None else [])
 
+def resolution_filter_options(
+        resolution: Optional[Resolution],
+        resolution_width: Optional[Width],
+        resolution_height: Optional[Height]
+):
+    if resolution is not None:
+        return [f'scale={resolution.width}:{resolution.height}']
+    if resolution_width is not None:
+        return [f'scale={resolution_width}:-1']
+    if resolution_height is not None:
+        return [f'scale=-1:{resolution_height}']
+    return []
+
+
+def filter_options(
+        fps: Optional[FramesPerSecond],
+        resolution: Optional[Resolution],
+        resolution_width: Optional[Width],
+        resolution_height: Optional[Height]
+):
     filters = [
-        *(fps_filter if fps is not None else []),
-        *(resolution_filter if resolution is not None else [])
+        *fps_filter_options(fps),
+        *resolution_filter_options(resolution, resolution_width, resolution_height)
     ]
+
+    if len(filters) == 0:
+        return []
 
     filters_str = ",".join(filters)
     return ['-filter:v', filters_str]
@@ -329,7 +350,9 @@ def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
             *input_options(config.input_path),
             *filter_options(
                 config.video_config.frames_per_second,
-                config.video_config.resolution
+                config.video_config.resolution,
+                config.video_config.resolution_width,
+                config.video_config.resolution_height
             ),
             *h264_crf_options(config.h264_config.crf),
             *PIX_FMT_OPTIONS,
@@ -359,7 +382,9 @@ def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
             *input_options(config.input_path),
             *filter_options(
                 config.video_config.frames_per_second,
-                config.video_config.resolution
+                config.video_config.resolution,
+                config.video_config.resolution_width,
+                config.video_config.resolution_height
             ),
             *h264_twopass_options(video_bitrate),
             *PIX_FMT_OPTIONS,
@@ -373,7 +398,9 @@ def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
             *input_options(config.input_path),
             *filter_options(
                 config.video_config.frames_per_second,
-                config.video_config.resolution
+                config.video_config.resolution,
+                config.video_config.resolution_width,
+                config.video_config.resolution_height
             ),
             *h264_twopass_options(video_bitrate),
             *PIX_FMT_OPTIONS,
@@ -465,12 +492,32 @@ def make_argument_parser():
         dest='frames_per_second'
     )
 
-    video_group.add_argument(
+    ###########################################################################
+
+    scale_group = video_group.add_mutually_exclusive_group()
+
+    scale_group.add_argument(
         '-s', '--scale',
         action=ResolutionArgParseAction,
         help="Resolution",
         metavar='WIDTHxHEIGHT',
         dest='resolution'
+    )
+
+    scale_group.add_argument(
+        '-sw', '--scale-width',
+        type=Width,
+        help="Resolution width",
+        metavar='WIDTH',
+        dest='resolution_width'
+    )
+
+    scale_group.add_argument(
+        '-sh', '--scale-height',
+        type=Height,
+        help="Resolution height",
+        metavar='HEIGHT',
+        dest='resolution_height'
     )
 
     ###########################################################################
@@ -560,7 +607,9 @@ def main():
         output_path=args.output_path,
         video_config=VideoConfig(
             frames_per_second=args.frames_per_second,
-            resolution=args.resolution
+            resolution=args.resolution,
+            resolution_width=args.resolution_width,
+            resolution_height=args.resolution_height
         ),
         h264_config=(
             ConstantRateFactorConfig(crf=args.constant_rate_factor)

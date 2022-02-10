@@ -19,6 +19,7 @@
 
 import argparse
 import logging
+import re
 import sys
 import subprocess
 
@@ -38,6 +39,8 @@ Kilobit = int
 Megabyte = int
 KilobitPerSecond = int
 FramesPerSecond = int
+Width = int
+Height = int
 
 
 ###############################################################################
@@ -106,6 +109,12 @@ class Duration:
 
     def __str__(self) -> str:
         return "{}.{}".format(self.seconds, self.microseconds)
+
+
+@dataclass
+class Resolution:
+    width: Width
+    height: Height
 
 
 ###############################################################################
@@ -178,6 +187,18 @@ def get_duration(path: Path) -> Duration:
     return Duration(*[int(s) for s in process.stdout.strip().split('.')])
 
 
+def get_resolution(path: Path) -> Resolution:
+    process = ffprobe(
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        path.as_posix()
+    )
+
+    return Resolution(*[int(s) for s in process.stdout.strip().split('\n')])
+
+
 ###############################################################################
 
 @dataclass
@@ -212,6 +233,7 @@ def run_ffmpeg(options: FfmpegOptions):
 @dataclass
 class VideoConfig:
     frames_per_second: Optional[int]
+    resolution: Optional[Resolution]
 
 
 @dataclass
@@ -265,14 +287,25 @@ def output_options(path: Path):
     return [path.as_posix()]
 
 
-def frames_per_second_options(fps: Optional[int]):
-    return (['-filter:v', f'fps={fps}']
-            if fps is not None
-            else [])
+def filter_options(fps: Optional[int], resolution: Optional[Resolution]):
+    if (fps is None and resolution is None):
+        return []
+
+    fps_filter = [f'fps={fps}'] if fps is not None else []
+    resolution_filter = ([f'scale={resolution.width}:{resolution.height}']
+                         if resolution is not None else [])
+
+    filters = [
+        *(fps_filter if fps is not None else []),
+        *(resolution_filter if resolution is not None else [])
+    ]
+
+    filters_str = ",".join(filters)
+    return ['-filter:v', filters_str]
 
 
-def h264_cfr_options(cfr: KilobitPerSecond):
-    return [*H264_CODEC_OPTIONS, '-cfr', str(cfr)]
+def h264_crf_options(crf: KilobitPerSecond):
+    return [*H264_CODEC_OPTIONS, '-crf', str(crf)]
 
 
 def h264_twopass_options(bitrate: KilobitPerSecond):
@@ -294,14 +327,17 @@ def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
         return FfmpegOnePassOptions([
             *FFMPEG_QUIET_OPTIONS,
             *input_options(config.input_path),
-            *frames_per_second_options(config.video_config.frames_per_second),
-            *h264_cfr_options(config.h264_config.crf),
+            *filter_options(
+                config.video_config.frames_per_second,
+                config.video_config.resolution
+            ),
+            *h264_crf_options(config.h264_config.crf),
             *PIX_FMT_OPTIONS,
             *aac_options(config.audio_config.bitrate, config.audio_config.mono),
             *H264_PROFILE_OPTIONS,
             *H264_PRESET_OPTIONS,
             *MP4_OPTIONS,
-            output_options(config.output_path)
+            *output_options(config.output_path)
         ])
 
     if isinstance(config.h264_config, TwoPassConfig):
@@ -321,7 +357,10 @@ def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
         return FfmpegTwoPassOptions([
             *FFMPEG_QUIET_OPTIONS,
             *input_options(config.input_path),
-            *frames_per_second_options(config.video_config.frames_per_second),
+            *filter_options(
+                config.video_config.frames_per_second,
+                config.video_config.resolution
+            ),
             *h264_twopass_options(video_bitrate),
             *PIX_FMT_OPTIONS,
             *FIRST_PASS_OPTIONS,
@@ -332,7 +371,10 @@ def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
         ], [
             *FFMPEG_QUIET_OPTIONS,
             *input_options(config.input_path),
-            *frames_per_second_options(config.video_config.frames_per_second),
+            *filter_options(
+                config.video_config.frames_per_second,
+                config.video_config.resolution
+            ),
             *h264_twopass_options(video_bitrate),
             *PIX_FMT_OPTIONS,
             *SECOND_PASS_OPTIONS,
@@ -353,6 +395,24 @@ class ArgumentDefaultsHelpFormatter(argparse.HelpFormatter):
         return action.help + ' (default: %(default)s)'
 
 
+class ResolutionArgParseAction(argparse.Action):
+    PATTERN = re.compile(r'(\d+)x(\d+)')
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __call__(self, parser, namespace, resolution, option_string=None):
+        match = self.PATTERN.fullmatch(resolution)
+        if match is None:
+            parser.error(f"Provided value {resolution} is not a valid resolution "
+                         f"in the WIDTHxHEIGHT format.")
+        else:
+            setattr(namespace, self.dest,
+                    Resolution(int(match.group(1)), int(match.group(2))))
+
+
+###############################################################################
+
 def make_argument_parser():
     parser = argparse.ArgumentParser(
         formatter_class=ArgumentDefaultsHelpFormatter
@@ -360,7 +420,7 @@ def make_argument_parser():
 
     ###########################################################################
 
-    behavior_group = parser.add_argument_group("General behaviour")
+    behavior_group = parser.add_argument_group("general behaviour")
 
     behavior_group.add_argument(
         '-f', '--force',
@@ -372,7 +432,7 @@ def make_argument_parser():
 
     ###########################################################################
 
-    io_group = parser.add_argument_group("Files")
+    io_group = parser.add_argument_group("files")
 
     io_group.add_argument(
         '-i', '--in',
@@ -394,9 +454,9 @@ def make_argument_parser():
 
     ###########################################################################
 
-    encoder_group = parser.add_argument_group("Encoding")
+    video_group = parser.add_argument_group("video")
 
-    encoder_group.add_argument(
+    video_group.add_argument(
         '-fps', '--frames-per-second',
         default=30,
         type=int,
@@ -405,28 +465,19 @@ def make_argument_parser():
         dest='frames_per_second'
     )
 
-    encoder_group.add_argument(
-        '-ab', '--audio-bitrate',
-        type=int,
-        required=True,
-        help="Audio bitrate in kbps",
-        metavar='BITRATE',
-        dest='audio_bitrate'
-    )
-
-    encoder_group.add_argument(
-        '-m', '--mono',
-        action='store_true',
-        default=False,
-        help="Downmix audio to mono",
-        dest='audio_mono'
+    video_group.add_argument(
+        '-s', '--scale',
+        action=ResolutionArgParseAction,
+        help="Resolution",
+        metavar='WIDTHxHEIGHT',
+        dest='resolution'
     )
 
     ###########################################################################
 
-    video_group = encoder_group.add_mutually_exclusive_group(required=True)
+    h264_group = video_group.add_mutually_exclusive_group(required=True)
 
-    video_group.add_argument(
+    h264_group.add_argument(
         '-crf', '--constant-rate-factor',
         type=int,
         choices=range(0, 51 + 1),
@@ -435,12 +486,33 @@ def make_argument_parser():
         dest='constant_rate_factor'
     )
 
-    video_group.add_argument(
-        '-s', '--target-size',
+    h264_group.add_argument(
+        '-t', '--target-size',
         type=int,
         help="Desired file size in MB",
         metavar='SIZE',
         dest='target_size'
+    )
+
+    ###########################################################################
+
+    audio_group = parser.add_argument_group("audio")
+
+    audio_group.add_argument(
+        '-ab', '--audio-bitrate',
+        type=int,
+        required=True,
+        help="Audio bitrate in kbps",
+        metavar='BITRATE',
+        dest='audio_bitrate'
+    )
+
+    audio_group.add_argument(
+        '-m', '--mono',
+        action='store_true',
+        default=False,
+        help="Downmix audio to mono",
+        dest='audio_mono'
     )
 
     ###########################################################################
@@ -459,6 +531,8 @@ def main():
     argument_parser = make_argument_parser()
     args = argument_parser.parse_args()
 
+    ###########################################################################
+
     if args.input_path.is_file() is False:
         fatal("Input file does not exist or is not a file.")
 
@@ -468,10 +542,26 @@ def main():
     if args.output_path.exists() is True and args.force is False:
         fatal("Output file exists. If you want to overwrite it use --force.")
 
+    ###########################################################################
+
+    file_resolution = get_resolution(args.input_path)
+
+    if (
+        args.resolution is not None
+        and file_resolution.width % args.resolution.width != 0
+        and file_resolution.height % args.resolution.height != 0
+    ):
+        fatal("Specified resolution does not keep the aspect ratio.")
+
+    ###########################################################################
+
     config = TranscodingConfig(
         input_path=args.input_path,
         output_path=args.output_path,
-        video_config=VideoConfig(frames_per_second=args.frames_per_second),
+        video_config=VideoConfig(
+            frames_per_second=args.frames_per_second,
+            resolution=args.resolution
+        ),
         h264_config=(
             ConstantRateFactorConfig(crf=args.constant_rate_factor)
             if args.constant_rate_factor is not None

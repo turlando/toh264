@@ -16,7 +16,7 @@ The pip way
 ~~~~~~~~~~~
 
 Run ``pip install .`` from this directory or run
-``pip install git+https://github.com/turlando/toh264.git@v0.0.1``
+``pip install git+https://github.com/turlando/toh264.git@v0.0.2``
 
 
 Usage

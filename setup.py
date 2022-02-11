@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='toh264',
-    version='0.0.1',
+    version='0.0.2',
     url='http://github.com/turlando/toh264',
 
     author='Tancredi Orlando',

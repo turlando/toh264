@@ -194,7 +194,7 @@ def get_media_info(path: Path) -> MediaInfo:
 
 
 def get_duration(info: MediaInfo) -> Duration:
-    duration_str = info['streams'][0]['duration']
+    duration_str = info['format']['duration']
     return Duration(*[int(s) for s in duration_str.split('.')])
 
 

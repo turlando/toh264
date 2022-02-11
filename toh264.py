@@ -18,6 +18,7 @@
 ###############################################################################
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -175,28 +176,32 @@ def ffprobe(*args: str) -> subprocess.CompletedProcess:
 
 ###############################################################################
 
-def get_duration(path: Path) -> Duration:
+# *sighs*
+# The MediaInfo type represents the information returned by ffprobe encoded as
+# JSON. We're not really doing any type checking here given that its structure
+# is very dynamic. We're using this type in order to track the data flow.
+MediaInfo = dict
+
+def get_media_info(path: Path) -> MediaInfo:
     process = ffprobe(
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
+        '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_format', '-show_streams',
         path.as_posix()
     )
 
-    return Duration(*[int(s) for s in process.stdout.strip().split('.')])
+    return json.loads(process.stdout)
 
 
-def get_resolution(path: Path) -> Resolution:
-    process = ffprobe(
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        path.as_posix()
-    )
+def get_duration(info: MediaInfo) -> Duration:
+    duration_str = info['streams'][0]['duration']
+    return Duration(*[int(s) for s in duration_str.split('.')])
 
-    return Resolution(*[int(s) for s in process.stdout.strip().split('\n')])
+
+def get_resolution(info: MediaInfo) -> Resolution:
+    width = info['streams'][0]['width']
+    height = info['streams'][0]['height']
+    return Resolution(width, height)
 
 
 ###############################################################################
@@ -341,7 +346,10 @@ def aac_options(bitrate: KilobitPerSecond, mono: bool):
 
 ###############################################################################
 
-def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
+def config_to_options(
+        config: TranscodingConfig,
+        media_info: MediaInfo
+) -> FfmpegOptions:
     if isinstance(config.h264_config, ConstantRateFactorConfig):
         log.info("Transcoding in constant rate factor mode")
 
@@ -366,7 +374,7 @@ def config_to_options(config: TranscodingConfig) -> FfmpegOptions:
     if isinstance(config.h264_config, TwoPassConfig):
         log.info("Transcoding in two-pass mode")
 
-        duration = get_duration(config.input_path)
+        duration = get_duration(media_info)
         total_bitrate = to_kbps(megabytes_to_bytes(config.h264_config.target_size),
                                 duration)
         video_bitrate = total_bitrate - config.audio_config.bitrate
@@ -431,8 +439,8 @@ class ResolutionArgParseAction(argparse.Action):
     def __call__(self, parser, namespace, resolution, option_string=None):
         match = self.PATTERN.fullmatch(resolution)
         if match is None:
-            parser.error(f"Provided value {resolution} is not a valid resolution "
-                         f"in the WIDTHxHEIGHT format.")
+            parser.error(f"Provided value {resolution} is not a valid "
+                         f"resolution in the WIDTHxHEIGHT format.")
         else:
             setattr(namespace, self.dest,
                     Resolution(int(match.group(1)), int(match.group(2))))
@@ -591,7 +599,8 @@ def main():
 
     ###########################################################################
 
-    file_resolution = get_resolution(args.input_path)
+    media_info = get_media_info(args.input_path)
+    file_resolution = get_resolution(media_info)
 
     if (
         args.resolution is not None
@@ -622,7 +631,7 @@ def main():
         )
     )
 
-    ffmpeg_options = config_to_options(config)
+    ffmpeg_options = config_to_options(config, media_info)
 
     run_ffmpeg(ffmpeg_options)
 
